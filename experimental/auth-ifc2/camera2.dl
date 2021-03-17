@@ -1,0 +1,207 @@
+// souffle experimental/auth-ifc2/camera2.dl && for f in *.csv; do echo; echo $f; cat $f; done
+#include "labelChecking.dl"
+
+// Dataflow edges.
+.decl edge(src: symbol, tgt: symbol)
+.decl reachable(s: symbol, t: symbol)
+reachable(x, y):- edge(x, y).
+reachable(x, z):- edge(x, y), reachable(y, z).
+
+
+// TTL Attribute Semantics
+.decl groundedTTL(l: symbol, d: number)
+.decl derivedTTL(t: symbol, d: number)
+.decl ttl(t: symbol, d: number)
+derivedTTL(t, d) :- groundedTTL(t, d).
+derivedTTL(t, d) :- edge(s, t), derivedTTL(s, d).
+ttl(t, d) :- derivedTTL(t, _), d = min x: {edge(_, t), derivedTTL(t, x)}.
+
+// General Policy Specification w.r.t TTL
+.decl ttlViolation(a: symbol, b: symbol)
+ttlViolation(a, b) :- edge(a, b), ttl(a, ad), ttl(b, bd), ad < bd.
+
+// TODO: should combine with `says` or `speaksfor`
+// TODO: distinguish confidentiality and integrity labels.
+// Information Flow Control Attribute Semantics
+.decl ilabel(location: symbol, label: symbol)
+ilabel(t, l) :- edge(s, t), ilabel(t, l).
+
+
+//-----------------------------------------------------------------------------
+// Badge reader
+//-----------------------------------------------------------------------------
+// computation:
+// - emits badge IDs
+//
+// schema BadgeID
+//   ...
+// Perhaps we should define an ADT for BadgeID?
+//
+// particle BadgeReader
+//   net_badge_id: writes BadgeID
+//
+bindModule("BadgeReader",
+    $FlatMod(
+        $Nil(),
+        $Cons("br.badge_id", $Nil())
+    )).
+
+
+//-----------------------------------------------------------------------------
+// Security Camera
+//-----------------------------------------------------------------------------
+//
+// schema VideoStream
+//  ...
+//
+// particle SecurityCamera
+//   net_video_stream: writes VideoStream
+//
+bindModule("SecurityCamera",
+    $FlatMod(
+        $Nil(),
+        $Cons("sc.video_stream", $Nil())
+    )).
+// TODO: should combine with `says` or `speaksfor`
+// Application-specific policy
+groundedTTL(x, 30) :- reachable("sc.video_stream", x), ilabel(x, "log_incident").
+groundedTTL(x, 120) :- reachable("sc.video_stream", x), ilabel(x, "report_incident").
+// TODO: We will need something like this, but this is making the results imprecise
+// due to coarse dataflow edges.
+//groundedTTL(x, 0) :- reachable("sc.video_stream", x),
+// !ilabel(x, "report_incident"), !ilabel(x, "log_incident").
+
+//-----------------------------------------------------------------------------
+// FacesDB
+//-----------------------------------------------------------------------------
+//
+//
+// schema FacesDB
+//   ...
+//
+// particle FacesDBProvider
+//   faces_db: writes FacesDB
+//
+bindModule("FacesDBProvider",
+    $FlatMod(
+        $Nil(),
+        $Cons("fdb.faces_db", $Nil())
+    )).
+
+//-----------------------------------------------------------------------------
+/// Monitoring Service
+//-----------------------------------------------------------------------------
+// locations:
+// - camera virtual device
+// - database of faces
+// - network channel from badge reader
+// - storage for video of incidents
+// - network channel to security personnel
+// computation:
+// - face classification / detect incidents
+// - log incident
+// - retrieve video
+// schema Incident
+//   video_stream: VideoStream
+//   timestamp: Time
+//
+// particle MonitoringService
+//   badge_id: reads BadgeID
+//   faces_db: reads FacesDB
+//   incident: writes Incident
+bindModule("MonitoringService",
+    $FlatMod(
+        $Cons("ms.video_stream", $Cons("ms.badge_id", $Cons("ms.faces_db", $Nil()))),
+        $Cons("ms.incident", $Nil())
+    )).
+edge("ms.video_stream", "ms.incident").
+// Explicit derives from claims.
+// edge("ms.badge_id", "ms.incident").
+// edge("ms.faces_db", "ms.incident").
+
+//-------------------------------------------------------
+// Security Station
+//-------------------------------------------------------
+//
+// locations:
+//    - incident
+//    - report_incident
+//    - log_incident
+//
+// particle SecurityStation
+//   incident: reads Incident
+//   report_incident: writes Incident
+//   log_incident: writes Incident
+bindModule("SecurityStation",
+    $FlatMod(
+        $Cons("ss.incident", $Nil()),
+        $Cons("ss.report_incident", $Cons("ss.log_incident", $Nil()))
+    )).
+edge("ss.incident", "ss.report_incident").
+edge("ss.incident", "ss.log_incident").
+// Following correspond to state changes or claims.
+// e.g., added by reference monitors, developers, etc.
+ilabel("ss.log_incident", "log_incident").
+ilabel("ss.report_incident", "report_incident").
+
+//-------------------------------------------------------
+// LogIncident
+//-------------------------------------------------------
+//
+// particle LogIncident
+//   incident: reads Incident
+//   report: writes Incident
+bindModule("LogIncident",
+    $FlatMod(
+        $Cons("li.incident", $Nil()),
+        $Cons("li.store_incident", $Nil())
+    )).
+edge("li.incident", "li.store_incident").
+
+// particle ReportIncident
+//   incident: reads Incident
+//   report: writes Incident
+bindModule("ReportIncident",
+    $FlatMod(
+        $Cons("ri.incident", $Nil()),
+        $Cons("ri.store_incident", $Nil())
+    )).
+edge("ri.incident", "ri.store_incident").
+
+//----------------
+// IncidentArchive
+//----------------
+// particle InternetArchive
+//   log_incident: reads Incident
+//   report_incident: reads Incident
+//   report: writes Incident
+bindModule("LogIncidentArchive",
+    $FlatMod(
+        $Cons("ia.log_incident", $Cons("ia.report_incident", $Nil())),
+        $Nil()
+    )).
+// Configration of the storage archives.
+ttl("ia.log_incident", 30).
+ttl("ia.report_incident", 210). // Misconfigured. Should be 120.
+
+// Interparticle Dataflow Edges
+edge("br.badge_id", "ms.badge_id").
+edge("fdb.faces_db", "ms.faces_db").
+edge("sc.video_stream", "ms.video_stream").
+edge("ms.incident", "ss.incident").
+edge("ss.report_incident", "ri.incident").
+edge("ss.log_incident", "li.incident").
+edge("li.incident", "ia.log_incident").
+edge("ri.incident", "ia.report_incident").
+
+
+.output groundedTTL
+.output ttl
+.output ttlViolation
+.output ilabel
+// .output flowsTo
+// .output bindModule
+// .output labelEnvironment
+// .output saysDowngrades
+// .output moduleLabelChecks
+
